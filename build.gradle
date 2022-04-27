@@ -14,7 +14,22 @@ dependencies {
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.8.1'
     //implementation group: 'org.json', name: 'json', version: '20220320'
     implementation group: 'com.googlecode.json-simple', name: 'json-simple', version: '1.1.1'
+    implementation group: 'org.openjfx', name: 'javafx', version: '11', ext: 'pom'
+    implementation 'uk.co.caprica:vlcj:4.7.2'
+    implementation "com.google.guava:guava:29.0-jre"
+    implementation "com.miglayout:miglayout-swing:5.2"
+    implementation "net.java.dev.glazedlists:glazedlists_java15:1.9.1"
+    implementation "org.slf4j:slf4j-log4j12:1.7.25"
+    implementation "uk.co.caprica:native-streams:1.0.0"
+    implementation "uk.co.caprica:vlcj:4.4.2"
+    implementation "com.fasterxml.jackson.core:jackson-core:2.9.6"
+    implementation "com.fasterxml.jackson.core:jackson-annotations:2.9.6"
+    implementation "com.fasterxml.jackson.core:jackson-databind:2.9.6"
+    compileOnly 'org.projectlombok:lombok:1.18.24'
+    annotationProcessor 'org.projectlombok:lombok:1.18.24'
 
+    testCompileOnly 'org.projectlombok:lombok:1.18.24'
+    testAnnotationProcessor 'org.projectlombok:lombok:1.18.24'
 }
 
 test {
