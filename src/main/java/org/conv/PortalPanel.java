@@ -2,20 +2,18 @@ package org.conv;
 
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
-import org.conv.model.BackItem;
-import org.conv.model.Category;
-import org.conv.model.ListItem;
-import org.conv.model.MediaItem;
+import org.conv.model.*;
 import uk.co.caprica.vlcjplayer.VlcjPlayer;
 
 import javax.swing.*;
+import javax.swing.event.ListDataListener;
 import java.awt.*;
 import java.awt.event.KeyEvent;
 import java.awt.event.KeyListener;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.*;
-import java.util.List;
+
 
 /**
  * @author Nassim MOUALEK
@@ -26,15 +24,46 @@ public class PortalPanel {
     @Getter
     private final Map<MediaStreamType, JList<ListItem>> jListByType = new HashMap<>();
     private final JTextField filter = new JTextField();
+    private final JTextField url = new JTextField();
+    private final JTextField mac = new JTextField();
+    private final JButton connect = new JButton();
     private final VlcjPlayer player;
-    private final XStreamClient xStreamClient;
-    private final Map<MediaStreamType, List<Category>> categoriesMap;
-    private final Map<MediaStreamType, List<MediaItem>> mediaItemsMap;
+    private final XSClient xStreamClient;
 
     public void showPlayer() {
         JPanel leftPanel = player.getLeftPanel();
+        JPanel urlPanel = new JPanel(new GridBagLayout());
+        JPanel macPanel = new JPanel(new GridBagLayout());
         JPanel gridPanel = new JPanel();
+        JLabel urlLabel = new JLabel("URL ");
+        //urlLabel.setLabelFor(url);
+        urlPanel.add(urlLabel);
+        urlPanel.add(url);
+        urlPanel.setPreferredSize(new Dimension(240, 20));
+        macPanel.setPreferredSize(new Dimension(240, 20));
+        JLabel macLabel = new JLabel("MAC ");
+        //macLabel.setLabelFor(mac);
+        macPanel.add(macLabel);
+        mac.setMinimumSize(new Dimension( 136, 16 ));
+        url.setPreferredSize(new Dimension( 200, 16 ));
+
+        macPanel.add(mac);
+        connect.setText("Connect");
+        macPanel.add(connect);
+        connect.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                try {
+                    xStreamClient.connect(url.getText(), mac.getText());
+                } catch (Exception ex) {
+                    ex.printStackTrace();
+                }
+            }
+        });
         leftPanel.add(gridPanel);
+        gridPanel.add(urlPanel);
+        gridPanel.add(macPanel);
+
         leftPanel.setLayout(new GridLayout(0, 1, 0, 0));
         JTabbedPane tabs = new JTabbedPane();
         tabs.setPreferredSize( new Dimension( 260, 0 ) );
@@ -62,26 +91,26 @@ public class PortalPanel {
                         ((DefaultListSelectionModel) list.getSelectionModel()).moveLeadSelectionIndex(index);
                         list.getComponentAt(evt.getPoint()).setFocusable(true);
                         list.getComponentAt(evt.getPoint()).transferFocus();
-                        List<MediaItem> items = null;
+                        LazyResponse items = null;
                         if (list.getSelectedValue() instanceof BackItem) {
                             back();
                         } else {
                             if (list.getSelectedValue() instanceof Category) {
                                 Category category = (Category) list.getSelectedValue();
                                 try {
-                                    items = xStreamClient.getItems(category.getType(), category.getId(), null, false);
+                                    items = xStreamClient.open(category, category.getId());
                                 } catch (Exception ex) {
                                     ex.printStackTrace();
                                 }
                             } else {
                                 try {
-                                    xStreamClient.open((MediaItem) list.getSelectedValue());
-                                    items = mediaItemsMap.get(xStreamClient.getSelectedMediaType());
+                                    items = xStreamClient.open((MediaItem) list.getSelectedValue(), null);
                                 } catch (Exception e) {
                                     e.printStackTrace();
                                 }
                             }
-                            pushData(items.toArray(new MediaItem[0]));
+                            if (items!=null)
+                                pushData(items);
                         }
                         rerender();
                     }
@@ -90,15 +119,15 @@ public class PortalPanel {
         }
         tabs.addChangeListener(e -> {
             try {
-                xStreamClient.setSelectedMediaType(MediaStreamType.values()[tabs.getSelectedIndex()]);
-                pushData(categoriesMap.get(xStreamClient.getSelectedMediaType()).toArray(new Category[0]));
+                LazyResponse lazyResponse = xStreamClient.setSelectedMediaType(MediaStreamType.values()[tabs.getSelectedIndex()]);
+                pushData(lazyResponse);
             } catch (Exception ex) {
                 ex.printStackTrace();
             }
         });
         tabs.setEnabledAt(0, true);
         JPanel filterPanel = new JPanel();
-        filter.setSize(185, 20);
+
         filter.setPreferredSize(new Dimension(185, 20));
         filter.setMinimumSize(new Dimension(185, 20));
 
@@ -106,9 +135,10 @@ public class PortalPanel {
         filterLabel.setLabelFor(filter);
         filterPanel.add(filterLabel);
         filterPanel.add(filter);
+        filterPanel.setPreferredSize(new Dimension(240, 30));
         gridPanel.add(filterPanel);
         tabs.setTabPlacement(JTabbedPane.TOP);
-        tabs.setPreferredSize(new Dimension(240, 250));
+        tabs.setPreferredSize(new Dimension(240, 450));
         gridPanel.add(tabs);
         gridPanel.setBackground(Color.gray);
         gridPanel.setPreferredSize(new Dimension(240, 250));
@@ -120,10 +150,10 @@ public class PortalPanel {
             @Override
             public void keyTyped(KeyEvent e) {
                 MediaStreamType type = xStreamClient.getSelectedMediaType();
-                ListItem[] data = stack.get(type).peek();
+                LazyResponse data = stack.get(type).peek();
                 if (!filter.getText().isEmpty())
-                    data = Arrays.stream(data).filter(a -> a.getTitle().toLowerCase().contains(filter.getText().toLowerCase())).toList().toArray(new Category[0]);
-                pushData(data);
+                    data = new LazyResponse(data.getItems().stream().filter(a -> a.getTitle().toLowerCase().contains(filter.getText().toLowerCase())).toList());
+                updateModel(data);
                 rerender();
             }
             @Override
@@ -133,27 +163,57 @@ public class PortalPanel {
         });
         rerender();
     }
-    private Map<MediaStreamType,Stack<ListItem[]>> stack = new HashMap<>();
-    public void pushData(ListItem[] data) {
+    private Map<MediaStreamType, Stack<LazyResponse>> stack = new HashMap<>();
+    public void pushData(LazyResponse data) {
         MediaStreamType type = xStreamClient.getSelectedMediaType();
         stack.putIfAbsent(type, new Stack<>());
-        jListByType.get(xStreamClient.getSelectedMediaType()).setListData(data);
+        //jListByType.get(xStreamClient.getSelectedMediaType()).setListData(data);
+        updateModel(data);
         stack.get(type).push(data);
         rerender();
     }
+
+    private void updateModel(LazyResponse data) {
+        jListByType.get(xStreamClient.getSelectedMediaType()).setModel(new ListModel<>() {
+            LazyResponse data_ = data;
+            @Override
+            public int getSize() {
+                return data_.getItems().size();
+            }
+
+            @Override
+            public ListItem getElementAt(int index) {
+                return data_.getItems().get(index);
+            }
+
+            @Override
+            public void addListDataListener(ListDataListener l) {
+
+            }
+
+            @Override
+            public void removeListDataListener(ListDataListener l) {
+
+            }
+        });
+    }
+
     public void back() {
         try {
             MediaStreamType type = xStreamClient.getSelectedMediaType();
             stack.get(type).pop();
-            jListByType.get(xStreamClient.getSelectedMediaType()).setListData(stack.get(type).peek());
-            //jListByType.get(xStreamClient.getSelectedMediaType()).setListData(categoriesMap.get(xStreamClient.getSelectedMediaType()).toArray(new Category[0]));
+            updateModel(stack.get(type).peek());
         } catch (Exception e) {
             e.printStackTrace();
         }
         rerender();
     }
-
-    private void rerender() {
+    public void rerenderItems() {
+        MediaStreamType type = xStreamClient.getSelectedMediaType();
+        updateModel(stack.get(type).peek());
+        rerender();
+    }
+    public void rerender() {
         player.getMainFrame().revalidate();
     }
 

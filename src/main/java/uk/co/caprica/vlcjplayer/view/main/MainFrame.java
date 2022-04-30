@@ -35,6 +35,7 @@ import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.prefs.Preferences;
 
 import javax.swing.*;
@@ -145,7 +146,8 @@ public final class MainFrame extends BaseFrame {
 //    private final MouseMovementDetector mouseMovementDetector;
 
     private final List<RendererItem> renderers = new ArrayList<>();
-
+    final AtomicInteger retry = new AtomicInteger();
+    final int MAX_RETRY = 3;
     public MainFrame() {
         super("vlcj player");
 
@@ -435,7 +437,6 @@ public final class MainFrame extends BaseFrame {
         bottomPane.add(statusBar, BorderLayout.SOUTH);
 
         contentPane.add(bottomPane, BorderLayout.SOUTH);
-
         MediaPlayerEventListener mediaPlayerEventListener = (new MediaPlayerEventAdapter() {
 
             @Override
@@ -450,24 +451,19 @@ public final class MainFrame extends BaseFrame {
 
             @Override
             public void playing(MediaPlayer mediaPlayer) {
-                SwingUtilities.invokeLater(new Runnable() {
-                    @Override
-                    public void run() {
-                        videoContentPane.showVideo();
+                SwingUtilities.invokeLater(() -> {
+                    videoContentPane.showVideo();
 //                        mouseMovementDetector.start();
-                        application().post(PlayingEvent.INSTANCE);
-                    }
+                    application().post(PlayingEvent.INSTANCE);
+                    retry.set(0);
                 });
             }
 
             @Override
             public void paused(MediaPlayer mediaPlayer) {
-                SwingUtilities.invokeLater(new Runnable() {
-                    @Override
-                    public void run() {
+                SwingUtilities.invokeLater(() -> {
 //                        mouseMovementDetector.stop();
-                        application().post(PausedEvent.INSTANCE);
-                    }
+                    application().post(PausedEvent.INSTANCE);
                 });
             }
 
@@ -497,15 +493,18 @@ public final class MainFrame extends BaseFrame {
 
             @Override
             public void error(MediaPlayer mediaPlayer) {
-                SwingUtilities.invokeLater(new Runnable() {
-                    @Override
-                    public void run() {
-                        videoContentPane.showDefault();
+                if (retry.incrementAndGet()<MAX_RETRY) {
+                    SwingUtilities.invokeLater(() -> {
+                        mediaPlayer.media().play(mediaPlayer.media().info().mrl());
+                    });
+                    System.out.println("Retring "+mediaPlayer.media().info().mrl());
+                } else
+                SwingUtilities.invokeLater(() -> {
+                    videoContentPane.showDefault();
 //                        mouseMovementDetector.stop();
-                        application().post(StoppedEvent.INSTANCE);
-                        File selectedFile = fileChooser.getSelectedFile();
-                        JOptionPane.showMessageDialog(MainFrame.this, MessageFormat.format(resources().getString("error.errorEncountered"), selectedFile != null ? selectedFile.getAbsolutePath() : ""), resources().getString("dialog.errorEncountered"), JOptionPane.ERROR_MESSAGE);
-                    }
+                    application().post(StoppedEvent.INSTANCE);
+                    File selectedFile = fileChooser.getSelectedFile();
+                    JOptionPane.showMessageDialog(MainFrame.this, MessageFormat.format(resources().getString("error.errorEncountered"), selectedFile != null ? selectedFile.getAbsolutePath() : ""), resources().getString("dialog.errorEncountered"), JOptionPane.ERROR_MESSAGE);
                 });
             }
 

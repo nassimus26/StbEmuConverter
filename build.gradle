@@ -25,6 +25,7 @@ dependencies {
     implementation "com.fasterxml.jackson.core:jackson-core:2.9.6"
     implementation "com.fasterxml.jackson.core:jackson-annotations:2.9.6"
     implementation "com.fasterxml.jackson.core:jackson-databind:2.9.6"
+    implementation 'io.github.nassimus26:FlowControl:1.0.9'
     compileOnly 'org.projectlombok:lombok:1.18.24'
     annotationProcessor 'org.projectlombok:lombok:1.18.24'
 

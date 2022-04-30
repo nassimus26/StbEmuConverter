@@ -8,6 +8,7 @@ import org.conv.model.*;
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
 import org.json.simple.JSONValue;
+import org.nassimus.thread.BufferedBatchFlowControlExecutor;
 import uk.co.caprica.vlcj.player.component.EmbeddedMediaPlayerComponent;
 import uk.co.caprica.vlcjplayer.VlcjPlayer;
 
@@ -17,27 +18,24 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.*;
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * @author Nassim MOUALEK
  * @since 23/04/2022
  */
-public class XStreamClient {
+public class XSClient {
     private String server;
     private String username;
     private String password;
     private String token;
     private String mac;
-    private String cmd;
     @Setter
     @Getter
     private MediaItem selectedItem;
     @Getter
     private MediaStreamType selectedMediaType = MediaStreamType.itv;
-    private Map<MediaStreamType, List<Category>> categoriesMap = new HashMap<>();
-    private Map<MediaStreamType, List<MediaItem>> mediaItemsMap = new HashMap<>();
-    private Map<MediaItem, List<MediaItem>> seriesMap = new HashMap<>();
 
     public String getExpirationDate() throws Exception {
         return (String) ((JSONObject) ((JSONObject) performGetAction(this.server,
@@ -54,37 +52,30 @@ public class XStreamClient {
         mapper.configure(
                 DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     }
-
+    private Map<String, Category> categoryMap = new HashMap<>();
     public Category[] getCategories(MediaStreamType type) throws Exception {
-        if (categoriesMap.containsKey(type))
-            return categoriesMap.get(type).toArray(new Category[0]);
         String action = type.equals(MediaStreamType.itv)?"get_genres":"get_categories";
         JSONObject r = (JSONObject) performGetAction(this.server,
-                "type="+type+"&action="+action+"&JsHttpRequest=1-xml&mac="+this.mac);
+                "type=" + type + "&action=" + action + "&JsHttpRequest=1-xml&mac=" + this.mac);
         JSONArray val = ((JSONArray) r.get("js"));
         Category[] categories = mapper.readValue(val.toJSONString(), Category[].class);
         for (Category c: categories) {
             c.setType(type);
             categoryMap.put(c.getId(), c);
         }
-        categoriesMap.put(type, Arrays.asList(categories));
         return categories;
     }
-
-    private Map<String, Category> categoryMap = new HashMap<>();
-
-    public List<MediaItem> getItems(MediaStreamType type, String catId, String movieId, boolean isEpisode) throws Exception {
+    private LazyResponse getItems(MediaStreamType type, String catId, String movieId, boolean isEpisode) throws Exception {
         AtomicInteger page = new AtomicInteger(1);
         AtomicInteger total = new AtomicInteger(0);
-        List<MediaItem> mediaItems = new ArrayList<>();
-        mediaItems.add(new BackItem());
-        getMediaItems(mediaItems, type, catId, movieId, isEpisode, page, total);
-        mediaItems.add(new BackItem());
-        mediaItemsMap.put(type, mediaItems);
-        return mediaItems;
+        LazyResponse lazyResponse = new LazyResponse(new CopyOnWriteArrayList<>());
+        lazyResponse.getItems().add(new BackItem());
+        lazyResponse.getItems().add(new BackItem());
+        getMediaItems(lazyResponse, type, catId, movieId, isEpisode, page, total);
+        return lazyResponse;
     }
-
-    private MediaItem[] getMediaItems(List<MediaItem> items, MediaStreamType type, String catId, String movieId, boolean isEpisode,
+    BufferedBatchFlowControlExecutor<String> processRows = null;
+    private MediaItem[] getMediaItems(LazyResponse lazyResponse, MediaStreamType type, String catId, String movieId, boolean isEpisode,
                                       AtomicInteger page, AtomicInteger total) throws IOException {
         String query = "action=get_ordered_list&force_ch_link_check=&fav=0&sortby=number" +
                 "&hd=0&JsHttpRequest=1-xml&from_ch_id=0&type=" + type + "&p=" + page +
@@ -106,9 +97,9 @@ public class XStreamClient {
         JSONArray val = (JSONArray) jsonObject.get("data");
         if (total.get()==0 && val.size()!=0) {
             Long total_items = (Long) jsonObject.get("total_items");
+            lazyResponse.setSize(total_items);
             total.set((int) (total_items / val.size()));
         }
-
         MediaItem[] mediaItems = (MediaItem[]) mapper.readValue(val.toJSONString(), resType);
         for (MediaItem c: mediaItems) {
             String catId_ = c instanceof StreamItem?((StreamItem)c).getTv_genre_id():c.getCategory_id();
@@ -116,15 +107,43 @@ public class XStreamClient {
             if (cat==null)
                 cat = categoryMap.get("*");
             c.setParent(cat);
-            items.add(c);
+            lazyResponse.getItems().add(lazyResponse.getItems().size()-1, c);
         }
-        if (page.incrementAndGet()<=total.get())
-            getMediaItems(items, type, catId, movieId, isEpisode, page, total);
+        if (page.get()==1) {
+            processRows =
+                    new BufferedBatchFlowControlExecutor<>(
+                            batchValues -> {
+                                try {
+                                    getMediaItems(lazyResponse, type, catId, movieId, isEpisode, page, total);
+                                    portalPanel.rerenderItems();
+                                } catch (Throwable e) {
+                                    e.printStackTrace();
+                                }
+                            }, 1, BufferedBatchFlowControlExecutor.getNbCores(), 10, "processRows") {
+
+                        @Override
+                        public void handleException(Exception e) {
+                            /* The executor will throw the exception at the end if any exception */
+                        }
+
+                    };
+            new Thread(
+                    ()->{
+                        while (page.incrementAndGet() <= total.get()) {
+                            try {
+                                processRows.submit("");
+                            } catch (InterruptedException e) {
+                                e.printStackTrace();
+                            }
+                        }
+                    }
+            ).run();
+        }
         return mediaItems;
     }
-    public void setSelectedMediaType(MediaStreamType selectedMediaType) throws Exception {
+    public LazyResponse setSelectedMediaType(MediaStreamType selectedMediaType) throws Exception {
         this.selectedMediaType = selectedMediaType;
-        loadCategories();
+        return open(null, null);
     }
     private Category[] loadCategories() throws Exception {
         return getCategories(selectedMediaType);
@@ -140,53 +159,60 @@ public class XStreamClient {
         String cmd_ = gcmd.replace("ffmpeg ", "");
         return cmd_;
     }
-    public void open() throws Exception {
-        open(null);
+    public LazyResponse open() throws Exception {
+        return open(null, null);
     }
-
-    public void open(MediaItem parent) throws Exception {
+    Map<Object, LazyResponse> cache = new HashMap<>();
+    public LazyResponse open(ListItem parent, String catId) throws Exception {
+        Object key = parent!=null?parent:selectedMediaType;
+        LazyResponse lazyResponse = cache.get(key);
+        if (lazyResponse!=null)
+            return lazyResponse;
+        if (catId!=null)
+            lazyResponse = getItems(selectedMediaType, catId, null, false);
+        else
         if (parent==null) {
-            loadCategories();
-            return;
-        }
-        if (selectedItem==parent)
-            return;
-        try {
-            if (parent instanceof SeriesItem) {
-                SeriesItem st = (SeriesItem) parent;
-                if (st.getSeries()!=null && st.getSeries().length>0) {
-                    mediaItemsMap.get(selectedMediaType).clear();
-                    mediaItemsMap.get(selectedMediaType).add(new BackItem());
-                    for (long l:st.getSeries())
-                        mediaItemsMap.get(selectedMediaType).add(new EpisodeItem(String.valueOf(l), "Episode "+l, parent));
-                    mediaItemsMap.get(selectedMediaType).add(new BackItem());
-                } else {
-                    if (seriesMap.containsKey(parent))
-                        mediaItemsMap.put(selectedMediaType, seriesMap.get(parent));
-                    else
-                        getItems(selectedMediaType, parent.getCategory_id(), parent.getId(), false);
-                    seriesMap.put(parent, mediaItemsMap.get(selectedMediaType));
-                }
-            } else if (parent instanceof EpisodeItem) {
-                SeriesItem mp = ((SeriesItem)parent.getParent());
-                //getMediaItems(items, selectedMediaType,  parent.getId(), parent.getId(), true, new AtomicInteger(), new AtomicInteger());
-                advancedPlay(createLink(MediaStreamType.vod,  mp.getCmd(), parent.getId()));
-            } else
-                advancedPlay(createLink(selectedMediaType, parent.getCmd(), null));
+            Category[] categories = loadCategories();
+            lazyResponse = new LazyResponse(Arrays.asList(categories));
+        } else {
+            MediaItem parent_ = (MediaItem) parent;
+            try {
+                if (parent instanceof SeriesItem) {
+                    SeriesItem st = (SeriesItem) parent;
+                    if (st.getSeries() != null && st.getSeries().length > 0) {
+                        List<ListItem> items = new ArrayList<>();
+                        items.add(new BackItem());
+                        for (long l : st.getSeries())
+                            items.add(new EpisodeItem(String.valueOf(l), "Episode " + l, parent_));
+                        items.add(new BackItem());
+                        lazyResponse = new LazyResponse(items);
+                    } else {
+                        lazyResponse = getItems(selectedMediaType, parent_.getCategory_id(), parent.getId(), false);
+                    }
+                } else if (parent instanceof EpisodeItem) {
+                    SeriesItem mp = ((SeriesItem) parent_.getParent());
+                    //getMediaItems(items, selectedMediaType,  parent.getId(), parent.getId(), true, new AtomicInteger(), new AtomicInteger());
+                    advancedPlay(createLink(MediaStreamType.vod, mp.getCmd(), parent.getId()));
+                } else
+                    advancedPlay(createLink(selectedMediaType, "http://localhost/ch/43346_", null));
 
-            selectedItem = parent;
-        } catch (Exception e) {
-            e.printStackTrace();
+                selectedItem = parent_;
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
         }
+        cache.put(key, lazyResponse);;
+        return lazyResponse;
     }
     private VlcjPlayer player = new VlcjPlayer();
 
-    private void advancedPlay(String url) {
+    private void advancedPlay(String url) throws InterruptedException {
+        System.out.println(url);
         player.play(url);
     }
     PortalPanel portalPanel;
     public void showPlayer() {
-        portalPanel = new PortalPanel( player, this, categoriesMap, mediaItemsMap );
+        portalPanel = new PortalPanel( player, this );
         portalPanel.showPlayer();
     }
 
@@ -220,7 +246,8 @@ public class XStreamClient {
         }
         return null;
     }
-    public Info getData(String url, String mac) throws Exception {
+    public Info connect(String url, String mac) throws Exception {
+            cache.clear();
             URI xuri = new URI(url);
             this.server = "http://" + xuri.getHost();
             if (xuri.getPort() > 0)
@@ -232,13 +259,10 @@ public class XStreamClient {
                 throw new RuntimeException("ERROR: No Authorization Token\n");
             if (!this.getProfile())
                 throw new RuntimeException("ERROR: No Valid Account\n");
-            if (!this.getOrderedVODList())
-                throw new RuntimeException("ERROR: No Connection to Xtream Server\n");
             if (!this.getLink())
                 throw new RuntimeException("ERROR: No Connection to Xtream Server\n");
-            loadCategories();
-            getUserInfo();
-            portalPanel.pushData(categoriesMap.get(selectedMediaType).toArray(new Category[0]));
+            portalPanel.pushData( open() );
+            System.out.println(getUserInfo());
         return new Info(url, username, password);
     }
     private Boolean getProfile() {
@@ -251,23 +275,17 @@ public class XStreamClient {
         }
     }
 
-    private Boolean getOrderedVODList() {
+    private Boolean getLink() {
         try {
             JSONObject out = (JSONObject) this.performGetAction(this.server, "action=get_ordered_list&type=vod&p=1&JsHttpRequest=1-xml");
             JSONObject js = (JSONObject)out.get("js");
             JSONArray res1 = (JSONArray)js.get("data");
             JSONObject res3 = (JSONObject)res1.get(1);
-            this.cmd = res3.get("cmd").toString();
-            return cmd.length() > 4 ? true : false;
-        } catch (Exception var5) {
-            return false;
-        }
-    }
-
-    private Boolean getLink() {
-        try {
-            JSONObject out = (JSONObject) this.performGetAction(this.server, "action=create_link&type=vod&cmd=" + this.cmd + "&JsHttpRequest=1-xml");
-            JSONObject js = (JSONObject)out.get("js");
+            String cmd = res3.get("cmd").toString();
+            if (cmd.length()<5)
+                return false;
+            out = (JSONObject) this.performGetAction(this.server, "action=create_link&type=vod&cmd=" + cmd + "&JsHttpRequest=1-xml");
+            js = (JSONObject)out.get("js");
             String cmd_str = js.get("cmd").toString();
             String[] parts = cmd_str.split("/");
             if (parts.length > 4) {
@@ -307,7 +325,7 @@ public class XStreamClient {
         String cookies = "mac=" + URLEncoder.encode(this.mac, "UTF-8") + "; stb_lang=en; timezone=Europe%2FParis; ";
 
         con.setRequestProperty("Cookie", cookies);
-        con.setDoOutput(true);
+
         con.setInstanceFollowRedirects(true);
 
         if (this.token != null)
@@ -323,5 +341,9 @@ public class XStreamClient {
         in.close();
         Object jout = JSONValue.parse(response.toString());
         return jout;
+    }
+
+    public VlcjPlayer getPlayer() {
+        return player;
     }
 }
